@@ -4,7 +4,7 @@
 #include <SPI.h>
 #include <Wire.h>
 
-#define DEBUG 1
+#define DEBUG 0
 #define SCREEN_WIDTH 128         // OLED display width, in pixels
 #define SCREEN_HEIGHT 64         // OLED display height, in pixels
 #define MIN_PROCESS_INTERVAL 10  //  Minimum processing interval (ms)
@@ -12,13 +12,21 @@
 #define MIN_DETECT_INTERVAL 100
 #define MIN_UPDATE_INTERVAL 500
 #define PPG_DATA_SIZE 64
-#define DISPLAY_BUFFER_SIZE 64
+#define DISPLAY_BUFFER_SIZE 32
 #define FILTER_WINDOW 9 // Adjust filter window size, less than PPG period
 #define HALF_WINDOW (FILTER_WINDOW / 2)
 #define HISTORY_SIZE 10
-#define MAX_PEAKS 5
+#define MAX_PEAKS 10
+#define MIN_PULSE_PERIOD 1
+#define MAX_PULSE_PERIOD 64
 
 const int analogInPin = A0;
+
+/* Blood pressure calculation */
+float systolicBP = 0;  // Systolic blood pressure
+float diastolicBP = 0; // Diastolic blood pressure
+float meanBP = 0;      // Mean blood pressure
+float resistance = 0;  // Peripheral resistance
 
 int ppgData[PPG_DATA_SIZE];
 int ppgIndex = 0;
@@ -75,12 +83,12 @@ void updateAdaptiveParams() {
     params.avgPulsePeriod = totalPeriod / validCount;
     params.pulseFreq = 1000.0 / (params.avgPulsePeriod * MIN_PROCESS_INTERVAL);
 
-    params.minABInterval = params.avgPulsePeriod * 0.15; // 15% of period
-    params.maxABInterval = params.avgPulsePeriod * 0.35; // 35% of period
-    params.minBCInterval = params.avgPulsePeriod * 0.20; // 20% of period
-    params.maxBCInterval = params.avgPulsePeriod * 0.40; // 40% of period
-    params.minCDInterval = params.avgPulsePeriod * 0.10; // 10% of period
-    params.maxCDInterval = params.avgPulsePeriod * 0.25; // 25% of period
+    params.minABInterval = params.avgPulsePeriod * 0.15;
+    params.maxABInterval = params.avgPulsePeriod * 0.35;
+    params.minBCInterval = params.avgPulsePeriod * 0.20;
+    params.maxBCInterval = params.avgPulsePeriod * 0.40;
+    params.minCDInterval = params.avgPulsePeriod * 0.10;
+    params.maxCDInterval = params.avgPulsePeriod * 0.25;
 
     float maxAmp = -99999, minAmp = 99999;
     for (int i = 0; i < PPG_DATA_SIZE; i++) {
@@ -161,7 +169,7 @@ void detectFeatures() {
         }
       }
 
-      if (isValley && isValidAPG && validPeakCount < MAX_PEAKS) {
+      if (isValley && validPeakCount < MAX_PEAKS) {
         validAPoints[validPeakCount] = i;
         lastA = i;
         validPeakCount++;
@@ -339,28 +347,34 @@ void displayPPGWaveform() {
 
   // Find ranges for both datasets
   for (int i = 0; i < DISPLAY_BUFFER_SIZE; i++) {
-    if (rawDisplayBuffer[i] < rawMin)
-      rawMin = rawDisplayBuffer[i];
-    if (rawDisplayBuffer[i] > rawMax)
-      rawMax = rawDisplayBuffer[i];
     if (filteredDisplayBuffer[i] < filteredMin)
       filteredMin = filteredDisplayBuffer[i];
     if (filteredDisplayBuffer[i] > filteredMax)
       filteredMax = filteredDisplayBuffer[i];
+
+#if DEBUG
+    if (rawDisplayBuffer[i] < rawMin)
+      rawMin = rawDisplayBuffer[i];
+    if (rawDisplayBuffer[i] > rawMax)
+      rawMax = rawDisplayBuffer[i];
+#endif
   }
 
   // Add boundary protection
-  if (rawMax == rawMin)
-    rawMax = rawMin + 1;
   if (filteredMax == filteredMin)
     filteredMax = filteredMin + 1;
 
+#if DEBUG
+  if (rawMax == rawMin)
+    rawMax = rawMin + 1;
+#endif
+
+#if DEBUG
   // Draw raw waveform (dotted line) - in upper half (0-31 pixels)
   float lastY = -1;
   int lastX = -1;
   for (int i = 0; i < DISPLAY_BUFFER_SIZE; i++) {
     int x = map(i, 0, DISPLAY_BUFFER_SIZE - 1, 0, SCREEN_WIDTH / 2 - 1);
-    // Map to upper half
     int y = map(rawDisplayBuffer[i], rawMin, rawMax, 31, 2);
     if (lastY >= 0 && y >= 0) {
       if (i % 2 == 0) { // Dotted line effect
@@ -371,12 +385,11 @@ void displayPPGWaveform() {
     lastY = y;
   }
 
-  // Draw filtered waveform (solid line) - in lower half (33-63 pixels)
+  // Draw filtered waveform in lower half
   lastY = -1;
   lastX = -1;
   for (int i = 0; i < DISPLAY_BUFFER_SIZE; i++) {
     int x = map(i, 0, DISPLAY_BUFFER_SIZE - 1, 0, SCREEN_WIDTH / 2 - 1);
-    // Map to lower half
     int y = map(filteredDisplayBuffer[i], filteredMin, filteredMax, 63, 34);
     if (lastY >= 0 && y >= 0) {
       display.drawLine(lastX, lastY, x, y, SSD1306_WHITE);
@@ -384,16 +397,58 @@ void displayPPGWaveform() {
     lastX = x;
     lastY = y;
   }
-  // Draw horizontal and vertical dividing lines
-  display.drawFastHLine(0, 32, SCREEN_WIDTH / 2,
-                        SSD1306_WHITE); // Horizontal divider
-  display.drawFastVLine(SCREEN_WIDTH / 2, 0, SCREEN_HEIGHT,
-                        SSD1306_WHITE); // Vertical divider
+
+#else
+  float lastY = -1;
+  int lastX = -1;
+  const int TOP_MARGIN = 15;
+  const int BOTTOM_MARGIN = 15;
+  const int WAVE_HEIGHT = SCREEN_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN;
+
+  for (int i = 0; i < DISPLAY_BUFFER_SIZE; i++) {
+    int x = map(i, 0, DISPLAY_BUFFER_SIZE - 1, 0, SCREEN_WIDTH / 2 - 1);
+
+    int y = map(filteredDisplayBuffer[i], filteredMin, filteredMax,
+                SCREEN_HEIGHT - BOTTOM_MARGIN, TOP_MARGIN);
+    if (lastY >= 0 && y >= 0) {
+      display.drawLine(lastX, lastY, x, y, SSD1306_WHITE);
+    }
+    lastX = x;
+    lastY = y;
+  }
+#endif
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(SCREEN_WIDTH / 2 + 5, 5);
+  display.print("SYS:");
+  display.print((int)systolicBP);
+
+  display.setCursor(SCREEN_WIDTH / 2 + 5, 20);
+  display.print("DIA:");
+  display.print((int)diastolicBP);
+
+  display.setCursor(SCREEN_WIDTH / 2 + 5, 35);
+  display.print("MAP:");
+  display.print((int)meanBP);
+
+  display.setCursor(SCREEN_WIDTH / 2 + 5, 50);
+  display.print("RES:");
+  display.print(resistance, 1);
 
   display.display();
 }
 
 void printFeaturePoints() {
+
+  static uint8_t printCounter = 0;
+  printCounter++;
+
+  if (printCounter % 4 != 0) {
+    return;
+  }
+
   Serial.println("=== Feature Points Detection Results ===");
   Serial.print("Valid Peak Count: ");
   Serial.println(validPeakCount);
@@ -436,6 +491,86 @@ void printFeaturePoints() {
   }
 }
 
+void calculateBP() {
+  if (validPeakCount < 2) {
+    Serial.println("Not enough peaks detected!");
+    return;
+  }
+
+  const float K_SYS = 2.0;
+  const float K_DIA = 1.5;
+  const float K_RES = 0.8;
+  float sumSystolic = 0;
+  float sumDiastolic = 0;
+  float sumResistance = 0;
+  int validCycles = 0;
+
+  for (int i = 0; i < validPeakCount - 1; i++) {
+    float pulse_period = validAPoints[i + 1] - validAPoints[i];
+
+    if (pulse_period < MIN_PULSE_PERIOD || pulse_period > MAX_PULSE_PERIOD) {
+      continue;
+    }
+
+    float ab_amp =
+        filteredData[validBPoints[i]] - filteredData[validAPoints[i]];
+    float bc_amp =
+        filteredData[validBPoints[i]] - filteredData[validCPoints[i]];
+    float cd_amp =
+        filteredData[validDPoints[i]] - filteredData[validCPoints[i]];
+
+    float ab_time = validBPoints[i] - validAPoints[i];
+    float bc_time = validCPoints[i] - validBPoints[i];
+    float cd_time = validDPoints[i] - validCPoints[i];
+
+    float ab_velocity = ab_amp / ab_time;
+    float cd_ratio = cd_amp / bc_amp;
+    float area = (ab_amp * ab_time + bc_amp * bc_time) / 2;
+
+    sumSystolic += K_SYS * ab_velocity * (1 + cd_ratio / 2);
+    sumDiastolic += K_DIA * (cd_amp / bc_amp) * (bc_time / ab_time);
+    sumResistance += K_RES * (area / pulse_period) * (1 + cd_time / bc_time);
+
+    validCycles++;
+
+    Serial.print("Cycle ");
+    Serial.print(i);
+    Serial.print(" Period:");
+    Serial.print(pulse_period);
+    Serial.print(" AB_vel:");
+    Serial.print(ab_velocity);
+    Serial.print(" CD_ratio:");
+    Serial.println(cd_ratio);
+  }
+
+  if (validCycles > 0) {
+
+    systolicBP = 90 + sumSystolic / validCycles;
+    diastolicBP = 60 + sumDiastolic / validCycles;
+    resistance = sumResistance / validCycles;
+
+    systolicBP = constrain(systolicBP, 90, 180);
+    diastolicBP = constrain(diastolicBP, 50, 110);
+
+    if (systolicBP <= diastolicBP) {
+      float avg = (systolicBP + diastolicBP) / 2;
+      systolicBP = avg + 20;
+      diastolicBP = avg - 10;
+    }
+
+    meanBP = diastolicBP + (systolicBP - diastolicBP) / 3;
+
+    Serial.print("BP Results - SBP:");
+    Serial.print(systolicBP, 1);
+    Serial.print(" DBP:");
+    Serial.print(diastolicBP, 1);
+    Serial.print(" MBP:");
+    Serial.print(meanBP, 1);
+    Serial.print(" R:");
+    Serial.println(resistance, 2);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -446,6 +581,13 @@ void setup() {
       ;
   }
   display.clearDisplay();
+  // Draw horizontal dividing line
+  display.drawFastHLine(0, 32, SCREEN_WIDTH / 2, SSD1306_WHITE);
+  // Draw horizontal and vertical dividing lines
+  display.drawFastHLine(0, 32, SCREEN_WIDTH / 2,
+                        SSD1306_WHITE); // Horizontal divider
+  display.drawFastVLine(SCREEN_WIDTH / 2, 0, SCREEN_HEIGHT,
+                        SSD1306_WHITE); // Vertical divider
   display.display();
 }
 
@@ -474,7 +616,7 @@ void loop() {
   // 200ms
   if (currentTime - lastFeatureTime >= MIN_DETECT_INTERVAL) {
     detectFeatures();
-#ifdef DEBUG
+#if DEBUG
     printFeaturePoints();
 #endif
     lastFeatureTime = currentTime;
@@ -482,7 +624,7 @@ void loop() {
 
   // 500ms
   if (currentTime - lastParamUpdateTime >= MIN_UPDATE_INTERVAL) {
-    updateAdaptiveParams();
+    calculateBP();
     lastParamUpdateTime = currentTime;
   }
 }
