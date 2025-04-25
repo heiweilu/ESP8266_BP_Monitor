@@ -4,121 +4,154 @@
 #include <SPI.h>
 #include <Wire.h>
 
-#define MKS_141 0
-#define PPG_Origin 1
-
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 
-#ifdef MKS_141
-#define PPG_WIDTH 65   // PPG waveform width, in pixels
-#define PACKET_SIZE 76 // Packet size, in bytes
-#define PPG_MIN -128   // PPG waveform min value
-#define PPG_MAX 127    // PPG waveform max value
-static int displayCount = 0;
-static int dataCount = 0;
-#endif /* MKS_141 */
-
-#ifdef PPG_Origin
 const int analogInPin = A0;
 #define PPG_DATA_SIZE 128
 int ppgData[PPG_DATA_SIZE];
 int ppgIndex = 0;
-#endif /* PPG_Origin */
 
 #define OLED_RESET -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-#define USART_RX_BUF_SIZE 128
-uint8_t USART_RX_BUF[USART_RX_BUF_SIZE];
+float filteredData[PPG_DATA_SIZE];
+
+#define MIN_PROCESS_INTERVAL 10 //  Minimum processing interval (ms)
+#define MIN_DISPLAY_INTERVAL 30 // Minimum display refresh interval (ms)
+
+// Buffer to store multiple periods of data
+#define DISPLAY_BUFFER_SIZE 128
+float displayBuffer[DISPLAY_BUFFER_SIZE];
+
+#define FILTER_WINDOW 9 // Adjust filter window size, less than PPG period
+#define HALF_WINDOW (FILTER_WINDOW / 2)
+
+// Store raw and filtered data separately
+float rawDisplayBuffer[DISPLAY_BUFFER_SIZE];
+float filteredDisplayBuffer[DISPLAY_BUFFER_SIZE];
+
+// Moving average filter with triangle window
+void applyMovingAverage() {
+  float sum = 0;
+  float weightSum = 0;
+
+  // Calculate index of latest point
+  int currentIndex = (ppgIndex == 0) ? PPG_DATA_SIZE - 1 : ppgIndex - 1;
+
+  // Use triangle window weights
+  for (int j = -HALF_WINDOW; j <= HALF_WINDOW; j++) {
+    // Calculate weight: maximum at center
+    float weight = HALF_WINDOW - abs(j);
+
+    // Access data using circular buffer
+    int index = (currentIndex + j + PPG_DATA_SIZE) % PPG_DATA_SIZE;
+
+    sum += ppgData[index] * weight;
+    weightSum += weight;
+  }
+
+  // Calculate weighted average
+  filteredData[currentIndex] = sum / weightSum;
+}
 
 /**
  * @brief Read and print raw PPG data from ADC
  */
 void readAndPrintPPGData() {
-  int adcValue = analogRead(analogInPin); // Read ADC value
-  Serial.print("Raw PPG Data: ");
-  Serial.println(adcValue); // Print ADC value to serial terminal
-  ppgData[ppgIndex] = adcValue;
+  int adcValue = analogRead(analogInPin); // Read and invert ADC data
+  adcValue = 1023 - adcValue;             // Invert raw data
+
+  // Update moving average
+  static float smoothedValue = adcValue;
+  const float ALPHA = 0.6;
+  smoothedValue = ALPHA * adcValue + (1 - ALPHA) * smoothedValue;
+
+  // Write to circular buffer
+  ppgData[ppgIndex] = smoothedValue;
   ppgIndex = (ppgIndex + 1) % PPG_DATA_SIZE;
 }
 
-/**
- * @brief display waveform data and blood pressure data
- * @note
- *      bit 2-65: Waveform data
- *      bit 72: Systolic blood pressure
- * 		bit 73: Diastolic blood pressure
- *	    bit 74: Peripheral resistance
- */
-void displaydata() {
-  displayCount++;
-  display.clearDisplay();
-
-  /* PPG waveform data */
-  if (displayCount >= 5) {
-    for (int i = 1; i < PPG_WIDTH; i++) {
-      int x = map(i - 1, 0, PPG_WIDTH - 1, 0, SCREEN_WIDTH / 2 - 1);
-
-      int value = (int8_t)USART_RX_BUF[i];
-      int y = map(value, PPG_MIN, PPG_MAX, SCREEN_HEIGHT - 1, 0);
-      display.drawPixel(x, y, SSD1306_WHITE);
-    }
-    displayCount = 0;
+// Update display buffer
+void updateDisplayBuffer() {
+  // Update raw data buffer
+  for (int i = DISPLAY_BUFFER_SIZE - 1; i > 0; i--) {
+    rawDisplayBuffer[i] = rawDisplayBuffer[i - 1];
+    filteredDisplayBuffer[i] = filteredDisplayBuffer[i - 1];
   }
 
-  /* Blood pressure data */
-  int systolic = USART_RX_BUF[71];
-  int diastolic = USART_RX_BUF[72];
-  int resistance = USART_RX_BUF[73];
-
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  display.setCursor(SCREEN_WIDTH / 2, 0);
-  display.print("Sys: ");
-  display.print(systolic);
-
-  display.setCursor(SCREEN_WIDTH / 2, 10);
-  display.print("Dia: ");
-  display.print(diastolic);
-
-  display.setCursor(SCREEN_WIDTH / 2, 20);
-  display.print("Res: ");
-  display.print(resistance);
-
-  display.display();
+  // Insert latest data point
+  int latestIndex = (ppgIndex == 0) ? PPG_DATA_SIZE - 1 : ppgIndex - 1;
+  rawDisplayBuffer[0] = ppgData[latestIndex];
+  filteredDisplayBuffer[0] = filteredData[latestIndex];
 }
+
 void displayPPGWaveform() {
   display.clearDisplay();
 
-  for (int i = 1; i < PPG_DATA_SIZE; i++) {
+  // Calculate ranges for raw and filtered data
+  float rawMin = 999, rawMax = -999;
+  float filteredMin = 999, filteredMax = -999;
 
-    int x1 = map(i - 1, 0, PPG_DATA_SIZE - 1, 0, SCREEN_WIDTH * 2 - 1);
-    int y1 = map(ppgData[i - 1], 0, 1023, SCREEN_HEIGHT - 1, 0);
-    int x2 = map(i, 0, PPG_DATA_SIZE - 1, 0, SCREEN_WIDTH * 2 - 1);
-    int y2 = map(ppgData[i], 0, 1023, SCREEN_HEIGHT - 1, 0);
-
-    if (x1 < SCREEN_WIDTH && x2 < SCREEN_WIDTH) {
-      display.drawLine(x1, y1, x2, y2, SSD1306_WHITE);
-    }
+  // Find ranges for both datasets
+  for (int i = 0; i < DISPLAY_BUFFER_SIZE; i++) {
+    if (rawDisplayBuffer[i] < rawMin)
+      rawMin = rawDisplayBuffer[i];
+    if (rawDisplayBuffer[i] > rawMax)
+      rawMax = rawDisplayBuffer[i];
+    if (filteredDisplayBuffer[i] < filteredMin)
+      filteredMin = filteredDisplayBuffer[i];
+    if (filteredDisplayBuffer[i] > filteredMax)
+      filteredMax = filteredDisplayBuffer[i];
   }
+
+  // Add boundary protection
+  if (rawMax == rawMin)
+    rawMax = rawMin + 1;
+  if (filteredMax == filteredMin)
+    filteredMax = filteredMin + 1;
+
+  // Draw raw waveform (dotted line) - in upper half (0-31 pixels)
+  float lastY = -1;
+  int lastX = -1;
+  for (int i = 0; i < DISPLAY_BUFFER_SIZE; i++) {
+    int x = map(i, 0, DISPLAY_BUFFER_SIZE - 1, 0, SCREEN_WIDTH / 2 - 1);
+    // Map to upper half
+    int y = map(rawDisplayBuffer[i], rawMin, rawMax, 31, 2);
+    if (lastY >= 0 && y >= 0) {
+      if (i % 2 == 0) { // Dotted line effect
+        display.drawLine(lastX, lastY, x, y, SSD1306_WHITE);
+      }
+    }
+    lastX = x;
+    lastY = y;
+  }
+
+  // Draw filtered waveform (solid line) - in lower half (33-63 pixels)
+  lastY = -1;
+  lastX = -1;
+  for (int i = 0; i < DISPLAY_BUFFER_SIZE; i++) {
+    int x = map(i, 0, DISPLAY_BUFFER_SIZE - 1, 0, SCREEN_WIDTH / 2 - 1);
+    // Map to lower half
+    int y = map(filteredDisplayBuffer[i], filteredMin, filteredMax, 63, 34);
+    if (lastY >= 0 && y >= 0) {
+      display.drawLine(lastX, lastY, x, y, SSD1306_WHITE);
+    }
+    lastX = x;
+    lastY = y;
+  }
+
+  // Draw horizontal and vertical dividing lines
+  display.drawFastHLine(0, 32, SCREEN_WIDTH / 2,
+                        SSD1306_WHITE); // Horizontal divider
+  display.drawFastVLine(SCREEN_WIDTH / 2, 0, SCREEN_HEIGHT,
+                        SSD1306_WHITE); // Vertical divider
 
   display.display();
 }
 
 void setup() {
-
-#ifdef MKS_141
-  /* Initialize serial; MKS-141 :38400; Send 0x8a to start*/
-  Serial.begin(38400);
-  Serial.write(0x8a);
-#endif /* MKS_141 */
-
-#ifdef PPG_Origin
-  /* Initialize serial; PPG_Origin :115200*/
   Serial.begin(115200);
-#endif /* PPG_Origin */
 
   /* Initialize OLED*/
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -131,33 +164,21 @@ void setup() {
 }
 
 void loop() {
+  static unsigned long lastSampleTime = 0;
+  static unsigned long lastDisplayTime = 0;
+  unsigned long currentTime = millis();
 
-#ifdef MKS_141
-  if (Serial.available() > 0) {
-    int incomingByte = Serial.read();
-
-    /* Frame Header: 0xFF*/
-    if (dataCount == 0 && incomingByte != 0xFF) {
-      return;
-    }
-
-    if (dataCount < PACKET_SIZE) {
-      USART_RX_BUF[dataCount++] = incomingByte;
-
-      if (dataCount == PACKET_SIZE) {
-        displaydata();
-        dataCount = 0;
-        memset(USART_RX_BUF, 0, sizeof(USART_RX_BUF));
-      }
-    }
+  // 10ms
+  if (currentTime - lastSampleTime >= MIN_PROCESS_INTERVAL) {
+    readAndPrintPPGData();
+    applyMovingAverage();
+    lastSampleTime = currentTime;
   }
 
-#endif /* MKS_141 */
-
-#ifdef PPG_Origin
-  /* Read and print raw PPG data */
-  readAndPrintPPGData();
-  // displayPPGWaveform();
-  delay(50);
-#endif /* PPG_Origin */
+  // 30ms
+  if (currentTime - lastDisplayTime >= MIN_DISPLAY_INTERVAL) {
+    updateDisplayBuffer();
+    displayPPGWaveform();
+    lastDisplayTime = currentTime;
+  }
 }
