@@ -89,11 +89,35 @@ for i = 1:length(ppgData)
 end
 
 
-% Calculate second-order difference (APG signal)
+% Calculate second-order difference (APG signal) with normalization
 apgData = zeros(size(filteredData));
 for i = 3:length(filteredData)
     apgData(i) = filteredData(i) - 2 * filteredData(i-1) + filteredData(i-2);
 end
+
+% Normalize APG signal
+maxAPG = max(apgData);
+minAPG = min(apgData);
+
+if maxAPG ~= minAPG
+    apgData = (apgData - minAPG) / (maxAPG - minAPG);
+end
+
+% Add visualization of APG signal
+figure;
+subplot(2,1,1);
+plot(filteredData);
+title('Filtered PPG Signal');
+xlabel('Sample');
+ylabel('Amplitude');
+grid on;
+
+subplot(2,1,2);
+plot(apgData);
+title('Normalized APG Signal');
+xlabel('Sample');
+ylabel('Normalized Amplitude');
+grid on;
 
 % Set threshold
 threshold = 0.6 * max(apgData);
